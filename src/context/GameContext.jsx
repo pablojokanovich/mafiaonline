@@ -78,6 +78,11 @@ export const GameProvider = ({ children }) => {
   }, []);
 
   const createRoom = (playerName) => {
+    console.log('[GameContext] Creating room for:', playerName);
+    if (!socket.connected) {
+       alert("No hay conexión con el servidor. Intenta recargar la página.");
+       return;
+    }
     socket.emit('create_room', { playerName, playerId: gameState.playerId });
     setGameState(prev => ({ ...prev, playerName }));
   };

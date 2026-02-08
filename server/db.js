@@ -27,10 +27,22 @@ export const initDB = () => {
       role TEXT,
       is_alive INTEGER DEFAULT 1,
       is_host INTEGER DEFAULT 0,
+      is_online INTEGER DEFAULT 1,
       socket_id TEXT,
       action_target TEXT,
+      has_acted_this_round INTEGER DEFAULT 0,
       FOREIGN KEY(room_id) REFERENCES rooms(id)
     )`);
+    
+    // Migration: Add is_online column if it doesn't exist
+    db.run(`ALTER TABLE players ADD COLUMN is_online INTEGER DEFAULT 1`, (err) => {
+       // Ignore error if column exists
+    });
+
+    // Migration: Add has_acted_this_round column if it doesn't exist
+    db.run(`ALTER TABLE players ADD COLUMN has_acted_this_round INTEGER DEFAULT 0`, (err) => {
+       // Ignore error if column exists
+    });
   });
 };
 

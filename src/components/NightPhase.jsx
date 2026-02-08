@@ -7,8 +7,11 @@ const NightPhase = ({ roomData, myPlayer }) => {
 
   const handlePlayerClick = (targetId) => {
     if (!myPlayer.isAlive) return;
+    
+    // Police Restriction: Single investigation per round
+    if (myPlayer.role === 'POLICE' && myPlayer.hasActedThisRound) return;
+
     if (targetId === myPlayer.id && myPlayer.role !== 'DOCTOR') return; // Usually can't pick self unless Doctor?
-    // Actually Mafia usually can't kill self, Police can't investigate self.
     
     performAction('NIGHT_ACTION', targetId);
   };
@@ -58,6 +61,11 @@ const NightPhase = ({ roomData, myPlayer }) => {
           {myPlayer.role === 'DOCTOR' && "Protege a alguien"}
           {myPlayer.role === 'VILLAGER' && "¿De quién sospechas?"}
         </p>
+        {myPlayer.role === 'POLICE' && myPlayer.hasActedThisRound && (
+          <p className="text-sm text-yellow-500 font-bold mt-2 animate-pulse">
+            Ya has seleccionado tu sospechoso para esta ronda
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -65,17 +73,18 @@ const NightPhase = ({ roomData, myPlayer }) => {
           const isSelected = myPlayer.actionTarget === p.id;
           const isPartnerVote = getMafiaPartnerVote(p.id);
           const isDead = !p.isAlive;
+          const isLocked = myPlayer.role === 'POLICE' && myPlayer.hasActedThisRound;
 
           return (
             <button
               key={p.id}
-              disabled={!myPlayer.isAlive || isDead}
+              disabled={!myPlayer.isAlive || isDead || isLocked}
               onClick={() => handlePlayerClick(p.id)}
               className={`
                 aspect-square rounded-lg flex flex-col items-center justify-center p-2 relative transition-all
                 ${isDead ? 'opacity-30 grayscale' : 'opacity-100'}
                 ${isSelected ? 'bg-zinc-800 border-2 border-white' : 'bg-zinc-900 border border-zinc-800'}
-                active:scale-95
+                ${!isLocked && !isDead ? 'active:scale-95' : 'cursor-not-allowed'}
               `}
             >
               <div className="w-10 h-10 rounded-full bg-zinc-800 flex items-center justify-center mb-2 text-zinc-400 font-bold text-sm">

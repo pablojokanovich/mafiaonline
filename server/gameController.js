@@ -1,6 +1,9 @@
 import { initDB, runQuery, getQuery, allQuery } from './db.js';
 import { v4 as uuidv4 } from 'uuid';
 
+// Store timer references to clear them if phase ends early
+const roomTimers = {};
+
 export const setupSocketHandlers = (io) => {
   io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -14,8 +17,8 @@ export const setupSocketHandlers = (io) => {
         await runQuery('DELETE FROM players WHERE id = ?', [playerId]);
         
         await runQuery(
-          'INSERT INTO players (id, room_id, name, is_host, socket_id, is_alive) VALUES (?, ?, ?, ?, ?, ?)',
-          [playerId, roomId, playerName, 1, socket.id, 1]
+          'INSERT INTO players (id, room_id, name, is_host, socket_id, is_alive, is_online) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [playerId, roomId, playerName, 1, socket.id, 1, 1]
         );
         
         socket.join(roomId);
@@ -35,11 +38,11 @@ export const setupSocketHandlers = (io) => {
         // Check if player exists, if so update socket
         const existingPlayer = await getQuery('SELECT * FROM players WHERE id = ?', [playerId]);
         if (existingPlayer) {
-             await runQuery('UPDATE players SET socket_id = ?, room_id = ?, name = ? WHERE id = ?', [socket.id, roomId, playerName, playerId]);
+             await runQuery('UPDATE players SET socket_id = ?, room_id = ?, name = ?, is_online = 1 WHERE id = ?', [socket.id, roomId, playerName, playerId]);
         } else {
              await runQuery(
-              'INSERT INTO players (id, room_id, name, is_host, socket_id, is_alive) VALUES (?, ?, ?, ?, ?, ?)',
-              [playerId, roomId, playerName, 0, socket.id, 1]
+              'INSERT INTO players (id, room_id, name, is_host, socket_id, is_alive, is_online) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              [playerId, roomId, playerName, 0, socket.id, 1, 1]
             );
         }
 
@@ -53,14 +56,8 @@ export const setupSocketHandlers = (io) => {
 
     socket.on('start_game', async ({ roomId }) => {
       try {
-        // Only host check (simplified, trust socket context or verify db)
-        // Ideally check if socket.id belongs to host of roomId
         const players = await allQuery('SELECT * FROM players WHERE room_id = ?', [roomId]);
-        if (players.length < 4) {
-            // Allow for testing with fewer, but warn?
-            // return socket.emit('error', 'Not enough players');
-        }
-
+        
         // Assign Roles
         let roles = [];
         let mafiaCount = players.length < 9 ? 1 : 2;
@@ -68,7 +65,6 @@ export const setupSocketHandlers = (io) => {
         let policeCount = 1;
         let villagerCount = players.length - mafiaCount - doctorCount - policeCount;
         
-        // Fix negative villagers for small tests
         if (villagerCount < 0) {
              mafiaCount = 1; doctorCount = 0; policeCount = 0;
              villagerCount = players.length - 1;
@@ -83,7 +79,7 @@ export const setupSocketHandlers = (io) => {
 
         // Update DB
         for (let i = 0; i < players.length; i++) {
-          await runQuery('UPDATE players SET role = ?, action_target = NULL WHERE id = ?', [roles[i], players[i].id]);
+          await runQuery('UPDATE players SET role = ?, action_target = NULL, has_acted_this_round = 0 WHERE id = ?', [roles[i], players[i].id]);
         }
 
         const endTime = Date.now() + 30000; // 30s
@@ -101,30 +97,74 @@ export const setupSocketHandlers = (io) => {
 
     socket.on('action', async ({ roomId, targetId, playerId }) => {
        try {
+           const room = await getQuery('SELECT * FROM rooms WHERE id = ?', [roomId]);
+           if (!room) return;
+
+           const player = await getQuery('SELECT * FROM players WHERE id = ?', [playerId]);
+           if (!player) return;
+
+           // Police Restriction: One investigation per round
+           if (player.role === 'POLICE' && room.status === 'NIGHT') {
+               if (player.has_acted_this_round) {
+                   console.log(`[AUDIT] Player ${player.name} (POLICE) attempted multiple investigations in room ${roomId}`);
+                   return socket.emit('error', 'Ya has seleccionado tu sospechoso para esta ronda');
+               }
+               await runQuery('UPDATE players SET has_acted_this_round = 1 WHERE id = ?', [playerId]);
+               console.log(`[AUDIT] Player ${player.name} (POLICE) investigated ${targetId} in room ${roomId}`);
+           }
+
            await runQuery('UPDATE players SET action_target = ? WHERE id = ?', [targetId, playerId]);
-           // Emit update to room so mafias can see each other (filtered on client) or just generic update
            await broadcastRoomState(io, roomId);
+
+           // Check for early completion if in DAY phase
+           if (room.status === 'DAY') {
+             const players = await allQuery('SELECT * FROM players WHERE room_id = ? AND is_alive = 1 AND is_online = 1', [roomId]);
+             const votedCount = players.filter(p => p.action_target).length;
+             
+             if (votedCount === players.length && players.length > 0) {
+               console.log(`[${roomId}] All online players voted. Ending DAY phase early.`);
+               clearTimeout(roomTimers[roomId]);
+               await handlePhaseTransition(io, roomId);
+             }
+           }
+
        } catch (err) {
            console.error(err);
        }
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       console.log('User disconnected:', socket.id);
-      // Optional: Handle cleanup or waiting for reconnect
+      try {
+        const player = await getQuery('SELECT * FROM players WHERE socket_id = ?', [socket.id]);
+        if (player) {
+           await runQuery('UPDATE players SET is_online = 0 WHERE id = ?', [player.id]);
+           await broadcastRoomState(io, player.room_id);
+           
+           // Check if this disconnection triggers early end (if everyone else has voted)
+           const room = await getQuery('SELECT * FROM rooms WHERE id = ?', [player.room_id]);
+           if (room && room.status === 'DAY') {
+               const players = await allQuery('SELECT * FROM players WHERE room_id = ? AND is_alive = 1 AND is_online = 1', [player.room_id]);
+               const votedCount = players.filter(p => p.action_target).length;
+               
+               if (votedCount === players.length && players.length > 0) {
+                   console.log(`[${player.room_id}] All online players voted (after disconnect). Ending DAY phase early.`);
+                   clearTimeout(roomTimers[player.room_id]);
+                   await handlePhaseTransition(io, player.room_id);
+               }
+           }
+        }
+      } catch (err) {
+        console.error(err);
+      }
     });
 
     socket.on('reset_server', async () => {
       try {
         console.log('RESETTING SERVER...');
-        // Clean DB
         await runQuery('DELETE FROM players');
         await runQuery('DELETE FROM rooms');
-        
-        // Notify all clients to reload/reset state
         io.emit('server_reset');
-        
-        // Exit process to force restart (nodemon will handle it)
         setTimeout(() => {
           process.exit(0);
         }, 1000);
@@ -140,6 +180,8 @@ const broadcastRoomState = async (io, roomId) => {
   const room = await getQuery('SELECT * FROM rooms WHERE id = ?', [roomId]);
   const players = await allQuery('SELECT * FROM players WHERE room_id = ?', [roomId]);
   
+  if (!room) return;
+
   // Transform to format expected by frontend
   const roomData = {
     id: room.id,
@@ -157,6 +199,8 @@ const broadcastRoomState = async (io, roomId) => {
       role: p.role,
       isAlive: !!p.is_alive,
       isHost: !!p.is_host,
+      isOnline: !!p.is_online,
+      hasActedThisRound: !!p.has_acted_this_round,
       actionTarget: p.action_target
     };
   });
@@ -165,7 +209,9 @@ const broadcastRoomState = async (io, roomId) => {
 };
 
 const startPhaseTimer = (io, roomId, durationMs) => {
-  setTimeout(async () => {
+  if (roomTimers[roomId]) clearTimeout(roomTimers[roomId]);
+  
+  roomTimers[roomId] = setTimeout(async () => {
     await handlePhaseTransition(io, roomId);
   }, durationMs);
 };
@@ -183,16 +229,12 @@ const handlePhaseTransition = async (io, roomId) => {
         // Mafia Target Logic
         let mafiaTargetId = null;
         const mafiaTargets = mafias.map(m => m.action_target).filter(t => t);
-        // Simple consensus: if any vote, take the first one or majority. 
-        // For strict rules: must match. Let's do strict match or first if single.
+        
         if (mafias.length > 0 && mafiaTargets.length > 0) {
-             // If all match
-             if (mafiaTargets.every(t => t === mafiaTargets[0])) {
-                 mafiaTargetId = mafiaTargets[0];
-             } else {
-                 // Disagreement = No Kill? or Random? Let's say First.
-                 mafiaTargetId = mafiaTargets[0];
-             }
+             const counts = {};
+             mafiaTargets.forEach(t => counts[t] = (counts[t] || 0) + 1);
+             const sorted = Object.entries(counts).sort((a,b) => b[1] - a[1]);
+             mafiaTargetId = sorted[0][0];
         }
 
         let victimId = null;
@@ -212,9 +254,9 @@ const handlePhaseTransition = async (io, roomId) => {
         }
 
         // Reset actions
-        await runQuery('UPDATE players SET action_target = NULL WHERE room_id = ?', [roomId]);
+        await runQuery('UPDATE players SET action_target = NULL, has_acted_this_round = 0 WHERE room_id = ?', [roomId]);
 
-        // Set Day
+        // Set Day (Merged Discussion + Voting)
         const dayTime = 120 * 1000; // 2 min
         await runQuery('UPDATE rooms SET status = ?, phase_end_time = ?, last_night_result = ? WHERE id = ?', 
             ['DAY', Date.now() + dayTime, log, roomId]);
@@ -223,14 +265,7 @@ const handlePhaseTransition = async (io, roomId) => {
         startPhaseTimer(io, roomId, dayTime);
 
     } else if (room.status === 'DAY') {
-        // End of debate -> Voting
-        const votingTime = 30 * 1000;
-        await runQuery('UPDATE rooms SET status = ?, phase_end_time = ? WHERE id = ?', ['VOTING', Date.now() + votingTime, roomId]);
-        await broadcastRoomState(io, roomId);
-        startPhaseTimer(io, roomId, votingTime);
-
-    } else if (room.status === 'VOTING') {
-        // Tally Votes
+        // Tally Votes directly from DAY phase
         const players = await allQuery('SELECT * FROM players WHERE room_id = ?', [roomId]);
         const votes = {};
         players.forEach(p => {
@@ -269,7 +304,7 @@ const handlePhaseTransition = async (io, roomId) => {
              const nightTime = 30 * 1000;
              await runQuery('UPDATE rooms SET status = ?, phase_end_time = ? WHERE id = ?', ['NIGHT', Date.now() + nightTime, roomId]);
              // Reset actions
-             await runQuery('UPDATE players SET action_target = NULL WHERE room_id = ?', [roomId]);
+             await runQuery('UPDATE players SET action_target = NULL, has_acted_this_round = 0 WHERE room_id = ?', [roomId]);
              startPhaseTimer(io, roomId, nightTime);
         }
 
