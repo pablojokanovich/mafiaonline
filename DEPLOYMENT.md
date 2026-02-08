@@ -28,12 +28,12 @@ La aplicación ha sido configurada como una Progressive Web App (PWA), lo que pe
      - Para producción real, cambia SQLite por **PostgreSQL** (disponible gratis en Neon.tech o Supabase).
 
 3. **Conexión Cliente-Servidor:**
-   - Una vez tengas la URL del servidor (ej: `https://mi-mafia-server.onrender.com`), actualiza el archivo `src/lib/socket.js`:
-     ```javascript
-     // Cambiar localhost por la URL de producción
-     export const socket = io('https://mi-mafia-server.onrender.com'); 
-     ```
-   - Vuelve a hacer `npm run build` y redespliega el frontend.
+   - **No necesitas editar el código manualmente.**
+   - He configurado la app para leer la URL del servidor desde una variable de entorno.
+   - En tu panel de hosting (Vercel/Netlify), busca la sección "Environment Variables" y añade:
+     - **Key:** `VITE_SERVER_URL`
+     - **Value:** La URL de tu backend en Render (ej: `https://mi-mafia-server.onrender.com`)
+   - Al hacer esto y redesplegar, la web se conectará automáticamente a esa URL.
 
 ## 2. Versión Android (APK)
 
