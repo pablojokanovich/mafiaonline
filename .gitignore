@@ -1,0 +1,17 @@
+node_modules
+dist
+.env
+.DS_Store
+*.log
+coverage/
+
+# Database
+server/mafia.db
+
+# Server dependencies
+server/node_modules
+
+# Capacitor Android
+android/app/build
+android/.gradle
+android/local.properties

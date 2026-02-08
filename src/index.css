@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-black text-white;
+  /* Prevent text selection to feel more like an app */
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
